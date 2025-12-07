@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import { fileURLToPath } from "url";
 import { ENV } from "./lib/env.js";
 import { connectDB } from "./lib/db.js";
 import cors from "cors";
@@ -8,16 +9,17 @@ import { inngest, functions } from "./lib/inngest.js";
 
 const app = express();
 
-const __dirname = path.resolve();
+// ✅ Proper __dirname in ESM (since "type": "module" in backend/package.json)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// middleware
+// ----------------- MIDDLEWARE -----------------
 app.use(express.json());
-// credentials:true meaning?? => server allows a browser to include cookies on request
 app.use(cors({ origin: ENV.CLIENT_URL, credentials: true }));
-// app.use(clerkMiddleware()); // this adds auth field to request object: req.auth()
 
 app.use("/api/inngest", serve({ client: inngest, functions }));
 
+// ----------------- ROUTES -----------------
 app.get("/health", (req, res) => {
   res.status(200).json({
     msg: "api is up and running",
@@ -30,22 +32,58 @@ app.get("/books", (req, res) => {
   });
 });
 
-// make our app ready for deployment
+// ----------------- SERVE FRONTEND IN PROD -----------------
+// This runs when NODE_ENV = "production" (on Vercel)
 if (ENV.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../frontend/dist")));
+  // server.js is in backend/src -> go two levels up to project root, then frontend/dist
+  const distPath = path.join(__dirname, "../../frontend/dist");
 
+  app.use(express.static(distPath));
+
+  // SPA fallback: any non-API route returns index.html
+  // ❗ use "/*" not "/{*any}"
   app.get("/{*any}", (req, res) => {
-    res.sendFile(path.join(__dirname, "../frontend", "dist", "index.html"));
+    res.sendFile(path.join(distPath, "index.html"));
   });
 }
 
-const startServer = async () => {
-  try {
-    await connectDB();
-    app.listen(ENV.PORT, () => console.log("Server is running on port:", ENV.PORT));
-  } catch (error) {
-    console.error("💥 Error starting the server", error);
-  }
-};
+// ----------------- DATABASE CONNECTION -----------------
+let dbConnected = false;
 
-startServer();
+async function ensureDB() {
+  if (!dbConnected) {
+    await connectDB();
+    dbConnected = true;
+    console.log("✅ MongoDB connected");
+  }
+}
+
+// ----------------- LOCAL VS VERCEL -----------------
+// Locally: run `npm run start` from backend → start normal server
+if (!process.env.VERCEL) {
+  const startServer = async () => {
+    try {
+      await ensureDB();
+      app.listen(ENV.PORT, () =>
+        console.log("Server is running on port:", ENV.PORT)
+      );
+    } catch (error) {
+      console.error("💥 Error starting the server", error);
+    }
+  };
+
+  startServer();
+} else {
+  // On Vercel: no app.listen, just make sure DB is ready on cold start
+  ensureDB().catch((err) =>
+    console.error("💥 Error connecting to DB on Vercel", err)
+  );
+}
+
+// ----------------- EXPORT FOR VERCEL -----------------
+// Vercel will import this Express app (via root index.js)
+export default app;
+
+
+
+//development
